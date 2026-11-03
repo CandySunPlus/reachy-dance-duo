@@ -1,0 +1,15 @@
+[project]
+name = "reachy-dance-duo-analyzer"
+version = "0.1.0"
+description = "yt-dlp + librosa analyzer backend for the Reachy Dance Duo JS app"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "ytmusicapi>=1.8",
+    "yt-dlp>=2024.10.7",
+    "librosa>=0.10.2",
+    "av>=13.1",
+    "numpy>=1.26,<2",
+    "pydantic>=2.9",
+]

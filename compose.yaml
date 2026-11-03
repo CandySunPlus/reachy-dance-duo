@@ -1,0 +1,45 @@
+services:
+  app:
+    build: ./analyzer
+    image: reachy-dance-analyzer:local
+    restart: unless-stopped
+    user: "1000:1000"
+    ports:
+      - "18888:7860"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - AUDIO_CACHE_DIR=/data/audio
+      - MAX_CACHE_BYTES=2147483648
+      - HOME=/data
+      - SITE_DIR=/srv
+    volumes:
+      # Sources are bind-mounted so a code/page edit only needs
+      # `docker compose restart app` — no image rebuild, no registry pull.
+      - ./analyzer/app:/app/app:ro
+      - ./site:/srv:ro
+      - ./data/audio:/data/audio
+      - ./certs:/certs:ro
+    # TLS on the custom port: AudioWorklet (Live Groove's BPM analyser),
+    # navigator.mediaDevices and crypto.randomUUID only exist in a secure
+    # context. deploy/gen-cert.sh writes the self-signed pair into ./certs.
+    command:
+      - uvicorn
+      - app.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "7860"
+      - --ssl-keyfile
+      - /certs/key.pem
+      - --ssl-certfile
+      - /certs/cert.pem
+    healthcheck:
+      test:
+        - CMD
+        - python3
+        - -c
+        - import ssl,urllib.request as u;u.urlopen('https://127.0.0.1:7860/health',timeout=3,context=ssl._create_unverified_context())
+      interval: 20s
+      timeout: 5s
+      retries: 3
+      start_period: 30s

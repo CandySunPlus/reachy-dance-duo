@@ -1462,7 +1462,7 @@
 		// --- Beat Bandit (QQ Music) ---
 		const analyzer = new AnalyzerClient();
 		let beatBandit = null, currentAnalysis = null;
-		let qqSession = null, qqPollTimer = null;
+		let qqSession = null, qqPollTimer = null, qqQrObjectUrl = null;
 
 		const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({
 			'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
@@ -1504,8 +1504,20 @@
 					new Promise((_, reject) => setTimeout(() => reject(new Error('QR request timed out')), 30000)),
 				]);
 				qqSession = login.session_id;
+				let src = login.qr_data_url;
+				if (login.qr_url) {
+					try {
+						const response = await fetch(analyzer.apiUrl(login.qr_url), { cache: 'no-store' });
+						if (!response.ok) throw new Error(`QR image ${response.status}`);
+						if (qqQrObjectUrl) URL.revokeObjectURL(qqQrObjectUrl);
+						qqQrObjectUrl = URL.createObjectURL(await response.blob());
+						src = qqQrObjectUrl;
+					} catch (e) {
+						// fall back to the inline data URL below
+					}
+				}
+				if (!src) throw new Error('QR image missing');
 				let fellBack = false;
-				qr.onload = () => { qr.hidden = false; };
 				qr.onerror = () => {
 					if (!fellBack && login.qr_data_url) {
 						fellBack = true;
@@ -1515,7 +1527,8 @@
 						qqLoginStatus.textContent = 'QR image failed to load; try Log in again';
 					}
 				};
-				qr.src = login.qr_url ? analyzer.apiUrl(login.qr_url) : login.qr_data_url;
+				qr.src = src;
+				qr.hidden = false;
 				qqLoginStatus.textContent = 'Scan with QQ or WeChat, then confirm on your phone.';
 				clearTimeout(qqPollTimer);
 				pollQQLogin();
@@ -1552,6 +1565,7 @@
 		qqLogoutBtn.addEventListener('click', async () => {
 			clearTimeout(qqPollTimer);
 			qqSession = null;
+			if (qqQrObjectUrl) { URL.revokeObjectURL(qqQrObjectUrl); qqQrObjectUrl = null; }
 			try { await analyzer.qqLogout(); } catch (e) { /* already logged out */ }
 			setQQAuth('QQ Music: not logged in', false);
 			qqLoginPanel.hidden = true;

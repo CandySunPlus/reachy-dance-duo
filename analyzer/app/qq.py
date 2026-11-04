@@ -17,6 +17,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 from qqmusic_api import (
@@ -31,11 +32,43 @@ from qqmusic_api import (
     LoginError,
     NetworkError,
 )
+from qqmusic_api.core import executor as _qq_executor
+from qqmusic_api.core import response as _qq_response
+from qqmusic_api.core.response import RawPayload as _RawPayload
 from qqmusic_api.models.login import QR, QRCodeLoginEvents, QRLoginType
 from qqmusic_api.modules.search import SearchType
 from qqmusic_api.modules.song import SongFileInfo, SongFileType
 
 logger = logging.getLogger(__name__)
+
+
+def _snapshot_payload_safe(response: Any) -> _RawPayload:
+    """QQMusicApi 0.8.2 breaks on QQ's ``ETK`` cookie.
+
+    The upstream ``snapshot_payload`` does ``response.cookies[name]``; QQ
+    sends ``ETK`` without a domain/path, so the cookie jar raises
+    ``KeyError: name='ETK', domain=None, path=None``. Build the snapshot by
+    iterating Cookie objects instead, which also keeps ``p_skey`` intact for
+    the OAuth step.
+    """
+    cookies: dict[str, str] = {}
+    for cookie in response.cookies:
+        name = getattr(cookie, "name", None)
+        if name:
+            cookies[name] = getattr(cookie, "value", "")
+    return _RawPayload(
+        status_code=response.status_code,
+        url=response.url,
+        headers=MappingProxyType(response.headers),
+        cookies=cookies,
+        content=response.content or b"",
+        text=response.text or "",
+    )
+
+
+# ``executor`` imported the original by value, so patch both references.
+_qq_response.snapshot_payload = _snapshot_payload_safe
+_qq_executor.snapshot_payload = _snapshot_payload_safe
 
 CREDENTIAL_PATH = Path(os.environ.get("QQ_CREDENTIAL_PATH", "/data/qq/credential.json"))
 QR_TTL_SECONDS = int(os.environ.get("QQ_QR_TTL_SECONDS", "180"))

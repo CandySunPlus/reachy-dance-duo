@@ -205,3 +205,32 @@ def test_login_qr_image_returns_bytes_and_rejects_unknown(tmp_path) -> None:
     )
     assert service.login_qr_image("session-1234") == (b"\x89PNG\r\n\x1a\n", "image/png")
     assert service.login_qr_image("missing") is None
+
+
+def test_snapshot_payload_handles_cookie_without_domain() -> None:
+    from types import SimpleNamespace
+
+    from qqmusic_api.core import executor
+
+    class Cookie:
+        def __init__(self, name: str, value: str) -> None:
+            self.name = name
+            self.value = value
+
+    class Jar:
+        def __iter__(self):
+            return iter([Cookie("ETK", "etk-value"), Cookie("p_skey", "skey-value")])
+
+    response = SimpleNamespace(
+        status_code=200,
+        url="https://ssl.ptlogin2.qq.com/ptqrlogin",
+        headers={"content-type": "text/plain"},
+        cookies=Jar(),
+        content=b"ptuiCB()",
+        text="ptuiCB()",
+    )
+
+    payload = qq._snapshot_payload_safe(response)
+    assert payload.cookies == {"ETK": "etk-value", "p_skey": "skey-value"}
+    assert payload.text == "ptuiCB()"
+    assert executor.snapshot_payload is qq._snapshot_payload_safe

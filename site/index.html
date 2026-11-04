@@ -276,6 +276,7 @@
 		#qq-auth { display: flex; align-items: center; gap: 8px; }
 		#qq-auth-text { flex: 1; }
 		#qq-login-panel { display: flex; gap: 10px; align-items: center; }
+		#qq-login-panel[hidden] { display: none; }
 		#qq-qr { width: 140px; height: 140px; border-radius: 6px; background: #fff; padding: 4px; }
 
 		/* --- Editor UI STYLES --- */
@@ -873,7 +874,7 @@
 		import { ReachyRobot } from './js/reachy_robot.js';
 		import { MusicNoteSystem, SVG3DSystem, getRainbowColor } from './js/visualizer.js';
         import { ReachyMini } from 'https://cdn.jsdelivr.net/npm/@pollen-robotics/reachy-mini-sdk@1.13.0/+esm';
-		import { DuoConnection } from './js/duo_connection.js';
+		import { DuoConnection } from './js/duo_connection.js?v=3';
 		import { LiveGroove } from './js/live_groove.js';
 		import { BeatBandit } from './js/beat_bandit.js';
 		import { AnalyzerClient } from './js/analyzer_client.js?v=2';
@@ -976,12 +977,10 @@
 
 		const rowPeaks = Array.from({ length: 12 }, () => ({ left: 40.5, right: 54.5 }));
 
-		// --- Shared AudioContext + monkey-patched getUserMedia ---
-		// The ReachyMini SDK's enableMicrophone:true causes it to call getUserMedia
-		// to acquire an outbound audio track for WebRTC. We intercept that call so
-		// the SDK gets a synthetic stream we control. Anything connected to
-		// robotAudioDest plays through the robot's speaker. (Borrowed from
-		// reachy-dance-duo-js / Anne-Charlotte's pattern.)
+		// --- Shared AudioContext + outgoing audio track ---
+		// SDK 1.13 creates its own silent placeholder and exposes
+		// setOutgoingAudioTrack(); anything connected to robotAudioDest is sent
+		// to the robot's speaker once the wireless session is streaming.
 		const audioContext = new (window.AudioContext || window.webkitAudioContext)();
 		const robotAudioDest = audioContext.createMediaStreamDestination();
 		let bbAudioElSource = null, bbMasterGain = null, bbLocalGain = null;
@@ -1013,37 +1012,6 @@
 			}
 		}
 
-		// navigator.mediaDevices is undefined outside a secure context (plain
-		// http on a LAN address), and this used to throw at module load. Only
-		// install the patch when the API exists; the rest of the page works.
-		const _md = navigator.mediaDevices;
-		const _origGUM = _md ? _md.getUserMedia.bind(_md) : null;
-		const _gumOverride = function (constraints) {
-			const stack = new Error().stack || '';
-			// Only intercept and override when called from the ReachyMini SDK
-			if (stack.includes('reachy-mini.js') || stack.includes('ReachyMini')) {
-				if (constraints && constraints.audio) {
-					console.log('[Audio Routing] Routing synthetic Beat Bandit stream to Wireless robot');
-					return Promise.resolve(robotAudioDest.stream);
-				}
-			}
-			if (!_origGUM) {
-				return Promise.reject(new Error(
-					'microphone unavailable: this page needs https (secure context)'));
-			}
-			console.log('[Audio Routing] Routing real microphone stream to caller');
-			return _origGUM(constraints);
-		};
-		if (_md) {
-			try {
-				_md.getUserMedia = _gumOverride;
-				if (_md.getUserMedia !== _gumOverride) {
-					Object.defineProperty(_md, 'getUserMedia', { value: _gumOverride, configurable: true, writable: true });
-				}
-			} catch (e) { console.warn('failed to monkey-patch getUserMedia', e); }
-		} else {
-			console.warn('[Audio Routing] no navigator.mediaDevices (insecure context): mic features disabled');
-		}
 		initAudioRouting();
 
 		async function ensureAudioContext() {
@@ -1081,6 +1049,21 @@
 		// --- DuoConnection: two SDK instances managed together ---
 		const duo = new DuoConnection(ReachyMini);
 		const $ = (id) => document.getElementById(id);
+
+		// Send the Beat Bandit audio graph to the wireless robot once its
+		// session is live. The SDK clears the outgoing track on stop, so this
+		// is re-applied on every streaming event.
+		duo.addEventListener('side-streaming', async (e) => {
+			if (e.detail.side !== 'wireless') return;
+			try {
+				const track = robotAudioDest.stream.getAudioTracks()[0];
+				if (!track) throw new Error('no outgoing audio track');
+				await duo.sideOf('wireless').instance.setOutgoingAudioTrack(track);
+				console.log('[Audio Routing] wireless outgoing audio applied');
+			} catch (err) {
+				console.warn('[Audio Routing] setOutgoingAudioTrack failed:', err);
+			}
+		});
 
 		function setAuthStatus(t) { $('auth-status').textContent = t; }
 		let signalingReady = { lite: false, wireless: false };
@@ -1655,7 +1638,12 @@
 				btn.disabled = true;
 				try {
 					await ensureAudioContext();
-					try { wireless.instance.setMicMuted(false); } catch {}
+					try {
+						const track = robotAudioDest.stream.getAudioTracks()[0];
+						await wireless.instance.setOutgoingAudioTrack(track);
+					} catch (e) {
+						console.warn('[Audio Routing] outgoing audio apply failed:', e);
+					}
 					beatBandit = new BeatBandit({ robot: wireless.instance, audioElement: audio, analysis: currentAnalysis });
 					beatBandit.addEventListener('blockEntered', (e) => {
 						$('bb-block').textContent = e.detail.block;
@@ -1674,7 +1662,6 @@
 				beatBandit.stop();
 				audio.pause(); audio.currentTime = 0;
 				beatBandit = null;
-				try { wireless.instance.setMicMuted(true); } catch {}
 				btn.textContent = 'Dance!';
 			}
 		});

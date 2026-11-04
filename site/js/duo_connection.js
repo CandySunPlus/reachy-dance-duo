@@ -28,13 +28,12 @@ export class DuoConnection extends EventTarget {
     }
 
     _makeSide(side) {
-        // Only the wireless side (Beat Bandit) needs to send audio out: the page
-        // routes the music stream into its WebRTC mic so the wireless robot
-        // plays the song. The lite side (Live Groove) listens to ambient sound
-        // via its own onboard mic and must not receive the music stream, so we
-        // leave enableMicrophone off on that side.
+        // Only the wireless side (Beat Bandit) sends audio out. SDK 1.13 no
+        // longer uses `enableMicrophone`/getUserMedia: it creates a silent
+        // placeholder track and exposes setOutgoingAudioTrack(). The page
+        // applies the music track on the `streaming` event. The lite side
+        // (Live Groove) only receives the robot's own mic/video.
         const inst = new this.ReachyMini({
-            enableMicrophone: side === 'wireless',
             appName: `dance-duo-${side}`,
             signalingUrl: 'https://pollen-robotics-reachy-mini-central.hf.space',
         });
@@ -100,6 +99,15 @@ export class DuoConnection extends EventTarget {
         const origPeerMessage = inst._handlePeerMessage?.bind(inst);
         if (origPeerMessage) {
             inst._handlePeerMessage = (msg) => {
+                // SDK 1.13 adds its silent placeholder track on every offer.
+                // A repeated offer would throw "A sender already exists for
+                // the track"; the page supplies audio via
+                // setOutgoingAudioTrack, so drop the placeholder first.
+                if (msg?.sdp?.type === 'offer' && inst._micStream) {
+                    for (const track of inst._micStream.getAudioTracks()) {
+                        inst._micStream.removeTrack(track);
+                    }
+                }
                 const kind = msg?.sdp ? `sdp:${msg.sdp.type}` : (msg?.ice ? 'ice' : '?');
                 console.log(`${tag} peer<- ${kind} sid=${String(msg?.sessionId).slice(0, 8)}`
                     + ` mySid=${String(inst._sessionId).slice(0, 8)} pc=${!!inst._pc}`);

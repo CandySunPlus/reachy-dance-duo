@@ -98,7 +98,7 @@ export class DuoConnection extends EventTarget {
         // connection to answer it with.
         const origPeerMessage = inst._handlePeerMessage?.bind(inst);
         if (origPeerMessage) {
-            inst._handlePeerMessage = (msg) => {
+            inst._handlePeerMessage = async (msg) => {
                 // SDK 1.13 adds its silent placeholder track on every offer.
                 // A repeated offer would throw "A sender already exists for
                 // the track"; the page supplies audio via
@@ -111,7 +111,23 @@ export class DuoConnection extends EventTarget {
                 const kind = msg?.sdp ? `sdp:${msg.sdp.type}` : (msg?.ice ? 'ice' : '?');
                 console.log(`${tag} peer<- ${kind} sid=${String(msg?.sessionId).slice(0, 8)}`
                     + ` mySid=${String(inst._sessionId).slice(0, 8)} pc=${!!inst._pc}`);
-                return origPeerMessage(msg);
+                if (msg?.sdp?.type === 'offer') {
+                    const audio = String(msg.sdp.sdp || '').split('\r\n').filter(
+                        (line) => /^(m=audio|a=sendrecv|a=recvonly|a=sendonly|a=inactive)/.test(line),
+                    );
+                    console.log(`${tag} audio sdp:`, audio.join(' | '));
+                }
+                const result = await origPeerMessage(msg);
+                // The SDK only recognizes an explicit a=sendrecv. If the
+                // daemon omits it but the offer has an audio m-line, the
+                // transceiver exists; re-apply the app's track directly.
+                if (msg?.sdp?.type === 'offer' && /m=audio/.test(msg.sdp.sdp || '')) {
+                    inst._micSupported = true;
+                    if (inst._outgoingAudioTrack) {
+                        await inst._applyOutgoingAudioTrack().catch(() => {});
+                    }
+                }
+                return result;
             };
         }
         return s;

@@ -875,7 +875,7 @@
 		import { ReachyRobot } from './js/reachy_robot.js';
 		import { MusicNoteSystem, SVG3DSystem, getRainbowColor } from './js/visualizer.js';
         import { ReachyMini } from 'https://cdn.jsdelivr.net/npm/@pollen-robotics/reachy-mini-sdk@1.13.0/+esm';
-		import { DuoConnection } from './js/duo_connection.js?v=3';
+		import { DuoConnection } from './js/duo_connection.js?v=5';
 		import { LiveGroove } from './js/live_groove.js';
 		import { BeatBandit } from './js/beat_bandit.js';
 		import { AnalyzerClient } from './js/analyzer_client.js?v=2';
@@ -1058,12 +1058,51 @@
 			ensureAudioContext().catch((e) => console.warn('[Audio] resume failed:', e));
 		});
 
+		// SDK 1.13's setOutgoingAudioTrack returns false when the daemon's
+		// offer omits the explicit `a=sendrecv` line, even though the audio
+		// transceiver exists. Fall back to replacing the sender track directly.
+		async function applyOutgoingAudio(inst, track) {
+			if (!track) return false;
+			try {
+				const applied = await inst.setOutgoingAudioTrack(track);
+				if (applied) return true;
+			} catch (e) {
+				console.warn('[Audio Routing] setOutgoingAudioTrack threw:', e);
+			}
+			const sender = inst.peerConnection?.getTransceivers()
+				.find((t) => t.receiver.track.kind === 'audio')?.sender;
+			if (!sender) return false;
+			await sender.replaceTrack(track);
+			inst._micSupported = true;
+			return true;
+		}
+
 		// Send the Beat Bandit audio graph to the wireless robot once its
 		// session is live. The SDK clears the outgoing track on stop, so this
 		// is re-applied on every streaming event.
 		duo.addEventListener('side-streaming', async (e) => {
 			if (e.detail.side !== 'wireless') return;
 			const inst = duo.sideOf('wireless').instance;
+
+			// Route audio first: it does not depend on the motor mode, and the
+			// diagnostics below can block on daemon round-trips.
+			try {
+				const track = robotAudioDest.stream.getAudioTracks()[0];
+				const applied = await applyOutgoingAudio(inst, track);
+				console.log('[Audio Routing] wireless outgoing audio applied=', applied,
+					'micSupported=', inst.micSupported);
+				if (applied) {
+					$('bb-audio-hint').textContent = 'Local playback is muted; audio is routed to the robot.';
+				} else {
+					$('bb-audio-hint').textContent = 'Robot audio route failed: no audio sender in the session.';
+					$('bb-audio-hint').className = 'dd-status err-status';
+				}
+			} catch (err) {
+				console.warn('[Audio Routing] outgoing audio apply failed:', err);
+				$('bb-audio-hint').textContent = `Robot audio route failed: ${err.message || err}`;
+				$('bb-audio-hint').className = 'dd-status err-status';
+			}
+
 			try {
 				await inst.ensureAwake();
 				console.log('[duo:wireless] ensureAwake, motor_mode=', inst.robotState?.motor_mode);
@@ -1071,13 +1110,19 @@
 				console.warn('[duo:wireless] ensureAwake failed:', err);
 			}
 			try {
-				const track = robotAudioDest.stream.getAudioTracks()[0];
-				if (!track) throw new Error('no outgoing audio track');
-				const applied = await inst.setOutgoingAudioTrack(track);
-				console.log('[Audio Routing] wireless outgoing audio applied=', applied,
-					'micSupported=', inst.micSupported);
+				console.log('[duo:wireless] daemon version=', await inst.getVersion());
 			} catch (err) {
-				console.warn('[Audio Routing] setOutgoingAudioTrack failed:', err);
+				console.warn('[duo:wireless] getVersion failed:', err);
+			}
+			try {
+				const volume = await inst.getVolume();
+				console.log('[Audio Routing] robot volume=', volume);
+				if (typeof volume === 'number' && volume < 0.2) {
+					await inst.setVolume(0.8);
+					console.log('[Audio Routing] raised robot volume to 0.8');
+				}
+			} catch (err) {
+				console.warn('[Audio Routing] volume check failed:', err);
 			}
 		});
 
@@ -1655,19 +1700,19 @@
 				try {
 					await ensureAudioContext();
 					try {
+						const track = robotAudioDest.stream.getAudioTracks()[0];
+						const applied = await applyOutgoingAudio(wireless.instance, track);
+						console.log('[Audio Routing] outgoing audio applied=', applied,
+							'micSupported=', wireless.instance.micSupported);
+					} catch (e) {
+						console.warn('[Audio Routing] outgoing audio apply failed:', e);
+					}
+					try {
 						await wireless.instance.ensureAwake();
 						console.log('[duo:wireless] ensureAwake before dance, motor_mode=',
 							wireless.instance.robotState?.motor_mode);
 					} catch (e) {
 						console.warn('[duo:wireless] ensureAwake before dance failed:', e);
-					}
-					try {
-						const track = robotAudioDest.stream.getAudioTracks()[0];
-						const applied = await wireless.instance.setOutgoingAudioTrack(track);
-						console.log('[Audio Routing] outgoing audio applied=', applied,
-							'micSupported=', wireless.instance.micSupported);
-					} catch (e) {
-						console.warn('[Audio Routing] outgoing audio apply failed:', e);
 					}
 					beatBandit = new BeatBandit({ robot: wireless.instance, audioElement: audio, analysis: currentAnalysis });
 					beatBandit.addEventListener('blockEntered', (e) => {

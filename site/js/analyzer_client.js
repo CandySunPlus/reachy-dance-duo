@@ -1,23 +1,21 @@
-// HTTP client for the reachy-dance-duo-analyzer Space.
+// HTTP client for the Reachy Dance Duo analyzer.
 //
 // Public API surface:
 //   const c = new AnalyzerClient();
-//   await c.search("daft punk one more time");
-//   const analysis = await c.analyze("wU26xVT_vBU");
+//   await c.qqState();
+//   const login = await c.qqLoginQrcode();
+//   await c.qqLoginStatus(login.session_id);
+//   const tracks = await c.qqSearch("song or artist");
+//   const analysis = await c.qqAnalyze(tracks[0]);
 //   <audio src={c.audioUrl(analysis.audio_url)} />
 //
-// The analyzer Space lives at TwinPeaksTownie/reachy-dance-duo-analyzer and
-// proxies yt-dlp through Carson's local helper via ngrok. Search uses
-// ytmusicapi (anonymous). Analyze runs librosa.
-//
-// analyzeUpload() is the self-contained path: it skips YouTube entirely, so
-// it works when the helper is down, when a track is region-restricted, or
-// when yt-dlp cannot find an audio format for it.
+// The analyzer resolves a short-lived QQ Music playback URL, downloads the
+// audio into its own cache, and returns a same-origin /audio path. The page
+// never sees a QQ credential or CDN URL.
 
 const DEFAULT_BASE = (() => {
     // `?analyzer=https://<your>-reachy-dance-duo-analyzer.hf.space` points a
-    // copy of this page at a different analyzer deployment (e.g. your own
-    // duplicate, once the shared one's yt-dlp helper stops resolving).
+    // copy of this page at a different analyzer deployment.
     try {
         const override = new URLSearchParams(location.search).get("analyzer");
         if (override) return override.replace(/\/+$/, "");
@@ -33,52 +31,69 @@ export class AnalyzerClient {
         this.baseUrl = baseUrl.replace(/\/+$/, "");
     }
 
+    async _request(path, { method = "GET", body, signal } = {}) {
+        const init = { method, signal };
+        if (body !== undefined) {
+            init.headers = { "Content-Type": "application/json" };
+            init.body = JSON.stringify(body);
+        }
+        const r = await fetch(`${this.baseUrl}${path}`, init);
+        const text = await r.text();
+        let payload = text;
+        try { payload = text ? JSON.parse(text) : null; } catch (_) { /* text error */ }
+        if (!r.ok) {
+            const detail = payload && typeof payload === "object"
+                ? (payload.detail ?? payload.message)
+                : payload;
+            const err = new Error(typeof detail === "string" ? detail : `HTTP ${r.status}`);
+            err.status = r.status;
+            throw err;
+        }
+        return payload;
+    }
+
     async health() {
-        const r = await fetch(`${this.baseUrl}/health`);
-        if (!r.ok) throw new Error(`health ${r.status}`);
-        return r.json();
+        return this._request("/health");
     }
 
-    // Returns array of { videoId, title, artists: [{name}], album, duration,
-    // duration_seconds, thumbnails: [{url, width, height}] }.
-    async search(query, limit = 10) {
-        const url = `${this.baseUrl}/search?q=${encodeURIComponent(query)}&limit=${limit}`;
-        const r = await fetch(url);
-        if (!r.ok) throw new Error(`search ${r.status}: ${await r.text()}`);
-        return r.json();
+    // Login state: { logged_in, expired, login_type }. Never includes tokens.
+    async qqState() {
+        return this._request("/qq/state");
     }
 
-    // Triggers download (via ngrok helper) + librosa analysis. Slow (20-60s
-    // depending on song length and helper warm/cold cache). Returns:
-    //   { video_id, audio_url, duration_sec, tempo, beats: number[],
-    //     energy_per_beat: number[], sequence_assignments: ("low"|"medium"|"high")[] }
-    async analyze(videoId, { signal } = {}) {
-        const r = await fetch(`${this.baseUrl}/analyze`, {
+    // Returns { session_id, qr_data_url, expires_in }.
+    async qqLoginQrcode() {
+        return this._request("/qq/login/qrcode", { method: "POST" });
+    }
+
+    // Returns { status, message, logged_in }; status is one of
+    // waiting | scanned | done | timeout | refused.
+    async qqLoginStatus(sessionId) {
+        return this._request(`/qq/login/status?session=${encodeURIComponent(sessionId)}`);
+    }
+
+    async qqLogout() {
+        return this._request("/qq/logout", { method: "POST" });
+    }
+
+    // Returns [{ mid, media_mid, song_type, title, singers, album,
+    // duration_sec, cover_url, pay_play }].
+    async qqSearch(query, limit = 8) {
+        return this._request(`/qq/search?q=${encodeURIComponent(query)}&limit=${limit}`);
+    }
+
+    // Resolves, downloads, and analyzes one search result. The response is the
+    // analyzer analysis plus { audio_url, mid, quality }.
+    async qqAnalyze(track, { signal } = {}) {
+        return this._request("/qq/analyze", {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ video_id: videoId }),
             signal,
-        });
-        if (!r.ok) throw new Error(`analyze ${r.status}: ${await r.text()}`);
-        return r.json();
-    }
-
-    // Analyze a local audio file instead of a YouTube id: no helper, no
-    // yt-dlp, no region/format lottery. The raw bytes go straight to the
-    // analyzer, which decodes them with ffmpeg and runs the same librosa
-    // pass. Returns the same shape as analyze(), with video_id null.
-    async analyzeUpload(file, { signal } = {}) {
-        const r = await fetch(
-            `${this.baseUrl}/analyze_upload?name=${encodeURIComponent(file.name || "upload")}`,
-            {
-                method: "POST",
-                headers: { "Content-Type": file.type || "application/octet-stream" },
-                body: file,
-                signal,
+            body: {
+                mid: track.mid,
+                media_mid: track.media_mid || null,
+                song_type: track.song_type || 0,
             },
-        );
-        if (!r.ok) throw new Error(`analyze_upload ${r.status}: ${await r.text()}`);
-        return r.json();
+        });
     }
 
     // The analyzer returns audio_url as a relative path. Prepend base.

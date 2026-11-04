@@ -1,22 +1,20 @@
-"""FastAPI entrypoint."""
+"""FastAPI entrypoint for the Reachy Dance Duo analyzer."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
 import os
-import re
-import uuid
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from . import analyze as analyze_mod
-from . import download, youtube
+from . import download, qq
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message)s")
 logger = logging.getLogger("analyzer")
@@ -31,119 +29,150 @@ app.add_middleware(
     allow_credentials=False,
 )
 
-
-VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{6,15}$")
-
 # Optional static page served from the same origin (self-hosted
 # deployments mount the Dance Duo checkout here).
 SITE_DIR = Path(os.environ.get("SITE_DIR", "/srv"))
 
-
-class AnalyzeBody(BaseModel):
-    video_id: str
+qq_service = qq.QQMusicService()
 
 
-# Raw-body uploads: no python-multipart dependency, and the decoder
-# (librosa/ffmpeg via av) sniffs the container anyway.
-MAX_UPLOAD_BYTES = 64 * 1024 * 1024
-UPLOAD_EXTS = {".m4a", ".mp3", ".wav", ".ogg", ".opus", ".flac", ".webm", ".mp4", ".aac"}
+class QQAnalyzeBody(BaseModel):
+    """A QQ Music track selection; identifiers come from ``/qq/search``."""
+
+    mid: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9]+$")
+    media_mid: str | None = Field(default=None, max_length=64, pattern=r"^[A-Za-z0-9]+$")
+    song_type: int = Field(default=0, ge=0)
+
+
+def _quality_from_path(path: Path, mid: str) -> str | None:
+    prefix = f"qq-{mid}-"
+    return path.stem[len(prefix) :] if path.stem.startswith(prefix) else None
+
+
+async def _resolve_or_http(body: QQAnalyzeBody) -> qq.ResolvedTrack:
+    """Resolve a track and translate source failures into HTTP statuses."""
+    try:
+        return await qq_service.resolve(body.mid, body.media_mid, body.song_type)
+    except qq.QQNotLoggedIn:
+        raise HTTPException(status_code=401, detail="qq_not_logged_in")
+    except qq.QQAuthError:
+        raise HTTPException(status_code=401, detail="qq_login_expired")
+    except qq.QQSongUnavailable:
+        raise HTTPException(status_code=404, detail="qq_song_unavailable")
+    except qq.QQUnavailable as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
 
 
 @app.get("/health")
 def health() -> dict[str, object]:
-    cookies_present = download.COOKIES_PATH.exists() and download.COOKIES_PATH.stat().st_size > 0
-    helper_configured = bool(download.HELPER_URL and download.HELPER_SECRET)
     return {
         "ok": True,
         "cache": download.cache_stats(),
-        "cookies": cookies_present,
-        "helper": helper_configured,
-        "helper_url": download.HELPER_URL if helper_configured else None,
+        "qq": qq_service.state(),
     }
 
 
-@app.get("/search")
-def search(q: str = Query(..., min_length=1, max_length=200), limit: int = 10) -> list[dict]:
+@app.get("/qq/state")
+def qq_state() -> dict[str, object]:
+    return qq_service.state()
+
+
+@app.post("/qq/login/qrcode")
+async def qq_login_qrcode() -> dict[str, object]:
     try:
-        return youtube.search(q, limit=limit)
-    except Exception as e:
-        logger.exception("search failed")
-        raise HTTPException(status_code=502, detail=f"search failed: {e}")
+        return await qq_service.login_qrcode()
+    except Exception as exc:  # noqa: BLE001 - surface the QQ/network reason
+        logger.exception("QQ login QR failed")
+        raise HTTPException(status_code=502, detail=f"qq login unavailable: {exc}")
 
 
-@app.post("/analyze")
-def analyze_endpoint(body: AnalyzeBody) -> dict:
-    if not VIDEO_ID_RE.match(body.video_id):
-        raise HTTPException(status_code=400, detail="invalid video_id")
+@app.get("/qq/login/status")
+async def qq_login_status(session: str = Query(..., min_length=8, max_length=64)) -> dict[str, object]:
     try:
-        path = download.fetch(body.video_id)
-    except Exception as e:
-        logger.exception("download failed")
-        raise HTTPException(status_code=502, detail=f"download failed: {e}")
+        return await qq_service.login_status(session)
+    except qq.QQAuthError as exc:
+        raise HTTPException(status_code=401, detail=str(exc))
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("QQ login poll failed")
+        raise HTTPException(status_code=502, detail=f"qq login poll failed: {exc}")
+
+
+@app.post("/qq/logout")
+async def qq_logout() -> dict[str, bool]:
+    await qq_service.logout()
+    return {"ok": True}
+
+
+@app.get("/qq/search")
+async def qq_search(
+    q: str = Query(..., min_length=1, max_length=200),
+    limit: int = Query(8, ge=1, le=30),
+) -> list[dict[str, object]]:
     try:
-        result = analyze_mod.analyze(path)
-    except ValueError as e:
-        raise HTTPException(status_code=422, detail=str(e))
-    except Exception as e:
-        logger.exception("analyze failed")
-        raise HTTPException(status_code=500, detail=f"analyze failed: {e}")
-    result["audio_url"] = f"/audio/{path.name}"
-    result["video_id"] = body.video_id
-    return result
+        return await qq_service.search(q, limit=limit)
+    except qq.QQAuthError:
+        raise HTTPException(status_code=401, detail="qq_login_expired")
+    except qq.QQUnavailable as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("QQ search failed")
+        raise HTTPException(status_code=502, detail=f"qq search failed: {exc}")
 
 
-@app.post("/analyze_upload")
-async def analyze_upload(request: Request, name: str = Query("upload", max_length=200)) -> dict:
-    """Analyze an uploaded audio file — no YouTube, no helper.
+@app.post("/qq/analyze")
+async def qq_analyze(body: QQAnalyzeBody) -> dict[str, object]:
+    prefix = f"qq-{body.mid}-"
+    path = download.find(prefix)
+    quality = _quality_from_path(path, body.mid) if path is not None else None
 
-    Body: the raw audio bytes. Query ``name``: the original filename (its
-    extension names the cached file; the decoder sniffs the container).
-    Response: same shape as ``/analyze``, with ``video_id`` set to None.
-    """
-    data = await request.body()
-    if not data:
-        raise HTTPException(status_code=400, detail="empty body")
-    if len(data) > MAX_UPLOAD_BYTES:
-        raise HTTPException(status_code=413, detail="file too large")
+    if path is None:
+        try:
+            resolved = await _resolve_or_http(body)
+        except HTTPException:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("QQ resolve failed")
+            raise HTTPException(status_code=502, detail=f"qq resolve failed: {exc}")
 
-    ext = Path(name).suffix.lower()
-    if ext not in UPLOAD_EXTS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"unsupported extension {ext!r}; use one of {sorted(UPLOAD_EXTS)}",
-        )
-    stem = re.sub(r"[^A-Za-z0-9_-]+", "", Path(name).stem)[:40] or "audio"
-    stored = Path(download.CACHE_DIR) / f"upload-{stem}-{uuid.uuid4().hex[:8]}{ext}"
-    try:
-        stored.write_bytes(data)
-    except OSError as e:
-        raise HTTPException(status_code=500, detail=f"could not store upload: {e}")
+        # QQ picks a random CDN node per resolution; a dead node is worth one
+        # fresh resolve. This is still the same source, not a fallback.
+        last_error: Exception | None = None
+        for attempt in range(2):
+            try:
+                path = await download.download(
+                    resolved.url,
+                    f"qq-{body.mid}-{resolved.quality}",
+                )
+                quality = resolved.quality
+                break
+            except Exception as exc:  # noqa: BLE001
+                last_error = exc
+                logger.warning("QQ download attempt %d failed: %s", attempt + 1, exc)
+                if attempt == 0:
+                    resolved = await _resolve_or_http(body)
+        else:
+            raise HTTPException(status_code=502, detail=f"qq download failed: {last_error}")
 
     try:
         # librosa is CPU-bound for seconds; keep the event loop free so the
-        # page's assets/health requests do not stall behind an upload.
-        result = await asyncio.to_thread(analyze_mod.analyze, stored)
-    except ValueError as e:
-        stored.unlink(missing_ok=True)
-        raise HTTPException(status_code=422, detail=str(e))
-    except Exception as e:
+        # page's assets/health requests do not stall behind analysis.
+        result = await asyncio.to_thread(analyze_mod.analyze, path)
+    except ValueError as exc:
+        path.unlink(missing_ok=True)  # unplayable/silent; next attempt re-downloads
+        raise HTTPException(status_code=422, detail=str(exc))
+    except Exception as exc:  # noqa: BLE001
         logger.exception("analyze failed")
-        stored.unlink(missing_ok=True)
-        raise HTTPException(status_code=500, detail=f"analyze failed: {e}")
+        raise HTTPException(status_code=500, detail=f"analyze failed: {exc}")
 
-    try:
-        download._evict_if_needed()  # keep the LRU cache bounded
-    except Exception:
-        pass
-
-    result["audio_url"] = f"/audio/{stored.name}"
-    result["video_id"] = None
+    result["audio_url"] = f"/audio/{path.name}"
+    result["mid"] = body.mid
+    result["quality"] = quality
     return result
 
 
 @app.get("/audio/{filename}")
 def audio_file(filename: str) -> FileResponse:
-    if "/" in filename or "\\" in filename or ".." in filename:
+    if "/" in filename or "\\" in filename or ".." in filename or filename.endswith(".part"):
         raise HTTPException(status_code=400, detail="invalid filename")
     p = Path(download.CACHE_DIR) / filename
     if not p.exists():
@@ -167,56 +196,20 @@ def index() -> JSONResponse:
     return JSONResponse(
         {
             "name": "reachy-dance-duo-analyzer",
-            "endpoints": ["/health", "/search?q=", "/analyze (POST)", "/analyze_upload (POST, raw audio body)", "/audio/<id>.<ext>", "/yt_debug?video_id="],
+            "endpoints": [
+                "/health",
+                "/qq/state",
+                "/qq/login/qrcode (POST)",
+                "/qq/login/status?session=",
+                "/qq/logout (POST)",
+                "/qq/search?q=",
+                "/qq/analyze (POST)",
+                "/audio/<file>",
+            ],
             "site": str(SITE_DIR) if SITE_DIR.is_dir() else None,
+            "quality": qq.configured_quality(),
         }
     )
-
-
-@app.get("/yt_debug")
-def yt_debug(video_id: str = Query(..., min_length=6, max_length=15)) -> dict:
-    """Probe yt-dlp without doing a full download.
-    Returns the version and the result of an info-only extraction.
-    Useful for diagnosing extractor / cookie / fingerprint issues."""
-    if not VIDEO_ID_RE.match(video_id):
-        raise HTTPException(status_code=400, detail="invalid video_id")
-    import yt_dlp  # local import so /health works even if yt-dlp is broken
-
-    ydl_opts = {
-        "quiet": True,
-        "no_warnings": True,
-        "simulate": True,
-        "skip_download": True,
-        "extractor_args": {"youtube": {"player_client": ["web"]}},
-        "user_agent": (
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
-        ),
-    }
-    if download._COOKIE_FILE is not None:
-        ydl_opts["cookiefile"] = str(download._COOKIE_FILE)
-
-    out: dict = {"yt_dlp_version": yt_dlp.version.__version__, "cookies_used": download._COOKIE_FILE is not None}
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:  # type: ignore[arg-type]
-            info = ydl.extract_info(youtube.youtube_url(video_id), download=False)
-        if info is None:
-            out["status"] = "no_info"
-            return out
-        formats = info.get("formats", []) or []
-        out["status"] = "ok"
-        out["title"] = info.get("title")
-        out["duration"] = info.get("duration")
-        out["format_count"] = len(formats)
-        out["audio_formats"] = [
-            {"format_id": f.get("format_id"), "ext": f.get("ext"), "abr": f.get("abr"), "acodec": f.get("acodec")}
-            for f in formats
-            if f.get("acodec") and f.get("acodec") != "none" and not f.get("vcodec") or f.get("vcodec") == "none"
-        ][:8]
-    except Exception as e:
-        out["status"] = "error"
-        out["error"] = str(e)[:600]
-    return out
 
 
 # Mounted last so every API route above wins. html=True serves index.html for

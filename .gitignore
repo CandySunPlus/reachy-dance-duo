@@ -48,6 +48,8 @@ pretrained/
 # Personal files & notes
 *.md
 !README.md
+!GLOSSARY.md
+!docs/adr/*.md
 emails_to_archive.md
 actions_and_notes.md
 keep_updated_on_these_topics.md

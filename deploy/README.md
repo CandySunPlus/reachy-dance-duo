@@ -7,7 +7,10 @@ on port 18888. No reverse proxy.
 ```bash
 # on Spark, inside a checkout of this repo
 cd ~/services/reachy-dance-duo        # or wherever you cloned it
-mkdir -p data/audio                   # audio cache (bind mount)
+mkdir -p data/audio data/qq           # audio cache + QQ credential
+chmod 700 data/qq                     # the credential file is created at 0600
+# The container runs as uid 1000; make the bind mounts writable by it.
+sudo chown -R 1000:1000 data/audio data/qq
 
 ./deploy/gen-cert.sh                  # self-signed cert for the hostname + LAN IP
 docker compose up -d --build          # first time builds the analyzer image
@@ -29,7 +32,10 @@ warning once (self-signed), or use `https://192.168.3.79:18888/` on the LAN.
 
 ## Notes
 
-- `data/` (audio cache) and `certs/` are runtime state and are git-ignored.
+- `data/` (audio cache + QQ credential) and `certs/` are runtime state and
+  are git-ignored.
+- Open the page, switch to Beat Bandit, and scan the QQ Music QR once; the
+  credential is written to `data/qq/credential.json` and refreshed in place.
 - The page needs a secure context for Live Groove (`AudioWorklet`); Beat Bandit
   works either way, so never drop the TLS wrapper without accepting that loss.
 - Sign-in on a self-hosted origin is a pasted HF token: HF OAuth needs the

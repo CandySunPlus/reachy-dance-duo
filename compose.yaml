@@ -12,12 +12,16 @@ services:
       - MAX_CACHE_BYTES=2147483648
       - HOME=/data
       - SITE_DIR=/srv
+      - QQ_CREDENTIAL_PATH=/data/qq/credential.json
+      - QQ_QUALITY=higher
     volumes:
       # Sources are bind-mounted so a code/page edit only needs
       # `docker compose restart app` — no image rebuild, no registry pull.
       - ./analyzer/app:/app/app:ro
       - ./site:/srv:ro
       - ./data/audio:/data/audio
+      # QQ credential (0600). Delete this directory to force a re-login.
+      - ./data/qq:/data/qq
       - ./certs:/certs:ro
     # TLS on the custom port: AudioWorklet (Live Groove's BPM analyser),
     # navigator.mediaDevices and crypto.randomUUID only exist in a secure

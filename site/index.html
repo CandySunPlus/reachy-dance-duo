@@ -273,6 +273,10 @@
 		.dd-status.success { background: rgba(74,222,128,0.10); color: #4ade80; }
 		.dd-status.err-status { background: rgba(248,113,113,0.10); color: #f87171; }
 		#bb-audio { width: 100%; margin: 6px 0; }
+		#qq-auth { display: flex; align-items: center; gap: 8px; }
+		#qq-auth-text { flex: 1; }
+		#qq-login-panel { display: flex; gap: 10px; align-items: center; }
+		#qq-qr { width: 140px; height: 140px; border-radius: 6px; background: #fff; padding: 4px; }
 
 		/* --- Editor UI STYLES --- */
 		#builder-panel {
@@ -787,12 +791,17 @@
 		<div id="bb-panel" class="dd-panel right" hidden>
 			<h4>Beat Bandit <span class="dd-tag white">Wireless</span><button class="dd-btn secondary switch-mode" style="float:right;font-size:0.65rem;padding:2px 8px;margin:0;width:auto;">换个模式</button></h4>
 			<div class="dd-search">
-				<input type="text" id="bb-query" placeholder="song or artist" autocomplete="off">
+				<input type="text" id="bb-query" placeholder="QQ Music: song or artist" autocomplete="off">
 				<button id="bb-search" class="dd-btn secondary">Search</button>
 			</div>
-			<div class="dd-search">
-				<label for="bb-file" class="dd-btn secondary" style="cursor:pointer;text-align:center">上传本地音频</label>
-				<input type="file" id="bb-file" accept="audio/*,.m4a,.mp3,.wav,.ogg,.opus,.flac,.aac" hidden>
+			<div id="qq-auth" class="dd-status">
+				<span id="qq-auth-text">QQ Music: checking login…</span>
+				<button id="qq-login" class="dd-btn secondary" style="width:auto;padding:2px 8px;margin:0;">Log in</button>
+				<button id="qq-logout" class="dd-btn secondary" style="width:auto;padding:2px 8px;margin:0;" hidden>Log out</button>
+			</div>
+			<div id="qq-login-panel" class="dd-status" hidden>
+				<img id="qq-qr" alt="QQ Music login QR">
+				<div id="qq-login-status" class="muted small">Scan with QQ or WeChat</div>
 			</div>
 			<ul id="bb-results" class="dd-results"></ul>
 			<div id="bb-status" class="dd-status" hidden></div>
@@ -820,8 +829,8 @@
 				<div class="step-num">2</div>
 				<h3>Pick a Mode</h3>
 				<p>Choose <strong>Live Groove</strong> for real-time analysis of ambient music with targeted beat
-					detection, or <strong>Beat Bandit</strong> where Reachy sails the high seas of YouTube to
-					procure your content.</p>
+					detection, or <strong>Beat Bandit</strong> where Reachy searches QQ Music, analyzes a
+					track, and dances to its beat grid.</p>
 			</div>
 			<div class="card">
 				<div class="step-num">3</div>
@@ -1450,11 +1459,91 @@
 			}
 		});
 
-		// --- Beat Bandit ---
+		// --- Beat Bandit (QQ Music) ---
 		const analyzer = new AnalyzerClient();
 		let beatBandit = null, currentAnalysis = null;
+		let qqSession = null, qqPollTimer = null;
+
+		const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({
+			'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+		}[c]));
+
+		const qqAuthText = $('qq-auth-text');
+		const qqLoginBtn = $('qq-login');
+		const qqLogoutBtn = $('qq-logout');
+		const qqLoginPanel = $('qq-login-panel');
+		const qqLoginStatus = $('qq-login-status');
+
+		function setQQAuth(text, loggedIn) {
+			qqAuthText.textContent = text;
+			qqLoginBtn.hidden = loggedIn;
+			qqLogoutBtn.hidden = !loggedIn;
+		}
+
+		async function refreshQQState() {
+			try {
+				const state = await analyzer.qqState();
+				if (!state.logged_in) setQQAuth('QQ Music: not logged in', false);
+				else if (state.expired) setQQAuth('QQ Music: login expired', true);
+				else setQQAuth('QQ Music: logged in', true);
+			} catch (e) {
+				setQQAuth('QQ Music: not logged in', false);
+			}
+		}
+
+		async function startQQLogin() {
+			qqLoginPanel.hidden = false;
+			qqLoginStatus.textContent = 'Requesting QR…';
+			qqLoginBtn.disabled = true;
+			try {
+				const login = await analyzer.qqLoginQrcode();
+				qqSession = login.session_id;
+				$('qq-qr').src = login.qr_data_url;
+				qqLoginStatus.textContent = 'Scan with QQ or WeChat, then confirm on your phone.';
+				clearTimeout(qqPollTimer);
+				pollQQLogin();
+			} catch (e) {
+				qqLoginStatus.textContent = `Login unavailable: ${e.message}`;
+			} finally {
+				qqLoginBtn.disabled = false;
+			}
+		}
+
+		async function pollQQLogin() {
+			if (!qqSession) return;
+			try {
+				const state = await analyzer.qqLoginStatus(qqSession);
+				qqLoginStatus.textContent = state.message || state.status;
+				if (state.status === 'done') {
+					qqSession = null;
+					qqLoginPanel.hidden = true;
+					await refreshQQState();
+					return;
+				}
+				if (state.status === 'timeout' || state.status === 'refused') {
+					qqSession = null;
+					return;
+				}
+			} catch (e) {
+				qqLoginStatus.textContent = e.message;
+				if (e.status === 401) { qqSession = null; return; }
+			}
+			qqPollTimer = setTimeout(pollQQLogin, 1500);
+		}
+
+		qqLoginBtn.addEventListener('click', startQQLogin);
+		qqLogoutBtn.addEventListener('click', async () => {
+			clearTimeout(qqPollTimer);
+			qqSession = null;
+			try { await analyzer.qqLogout(); } catch (e) { /* already logged out */ }
+			setQQAuth('QQ Music: not logged in', false);
+			qqLoginPanel.hidden = true;
+		});
+		refreshQQState();
+
 		$('bb-search').addEventListener('click', doSearch);
 		$('bb-query').addEventListener('keydown', (e) => { if (e.key === 'Enter') doSearch(); });
+
 		async function doSearch() {
 			const q = $('bb-query').value.trim();
 			if (!q) return;
@@ -1462,22 +1551,30 @@
 			$('bb-status').hidden = true;
 			ul.innerHTML = `<li class="muted">searching...</li>`;
 			try {
-				const tracks = await analyzer.search(q, 8);
+				const tracks = await analyzer.qqSearch(q, 8);
 				ul.innerHTML = '';
 				if (!tracks.length) { ul.innerHTML = `<li class="muted">no results</li>`; return; }
 				for (const t of tracks) {
-					if (!t.videoId) continue;
+					if (!t.mid) continue;
 					const li = document.createElement('li');
-					const thumb = (t.thumbnails || [])[0]?.url;
-					li.innerHTML = `${thumb ? `<img src="${thumb}" alt="" />` : ''}
-						<div class="meta"><div>${t.title}</div><div>${(t.artists || []).map(a => a.name).join(', ')}</div></div>`;
+					const thumb = t.cover_url;
+					const singers = (t.singers || []).join(', ');
+					const paid = t.pay_play ? ' · paid' : '';
+					li.innerHTML = `${thumb ? `<img src="${esc(thumb)}" alt="" />` : ''}
+						<div class="meta"><div>${esc(t.title)}</div><div>${esc(singers)}${t.album ? ' · ' + esc(t.album) : ''}${paid}</div></div>`;
 					li.addEventListener('click', () => analyzeTrack(t));
 					ul.appendChild(li);
 				}
 			} catch (e) {
-				ul.innerHTML = `<li class="err">${e.message}</li>`;
+				if (e.status === 401) {
+					ul.innerHTML = `<li class="err">QQ Music login required</li>`;
+					startQQLogin();
+				} else {
+					ul.innerHTML = `<li class="err">${esc(e.message)}</li>`;
+				}
 			}
 		}
+
 		function applyAnalysis(a) {
 			currentAnalysis = a;
 			$('bb-tempo').textContent = a.tempo.toFixed(1) + ' BPM';
@@ -1485,44 +1582,39 @@
 			$('bb-audio').load();
 			$('bb-toggle').disabled = false;
 			$('bb-status').className = 'dd-status success';
-			$('bb-status').innerHTML = `<b>Ready: ${a.tempo.toFixed(1)} BPM</b>`;
+			$('bb-status').innerHTML = `<b>Ready: ${a.tempo.toFixed(1)} BPM</b>${a.quality ? ` · ${esc(a.quality)}` : ''}`;
 		}
 
 		function analysisFailed(e) {
+			const message = e.status === 404
+				? 'QQ Music has no playable file for this track'
+				: e.status === 502
+					? 'QQ Music is unreachable; try again'
+					: e.message;
 			$('bb-toggle').disabled = true;
 			$('bb-status').hidden = false;
 			$('bb-status').className = 'dd-status err-status';
-			$('bb-status').innerHTML = `<b>Analysis failed:</b> ${e.message}`;
+			$('bb-status').innerHTML = `<b>Analysis failed:</b> ${esc(message)}`;
 		}
 
 		async function analyzeTrack(track) {
 			$('bb-status').hidden = false;
 			$('bb-status').className = 'dd-status pulse';
-			$('bb-status').innerHTML = `<b>Analyzing ${track.title}...</b>`;
+			$('bb-status').innerHTML = `<b>Analyzing ${esc(track.title)}...</b>`;
 			$('bb-toggle').disabled = true;
 			try {
-				applyAnalysis(await analyzer.analyze(track.videoId));
+				applyAnalysis(await analyzer.qqAnalyze(track));
 			} catch (e) {
-				analysisFailed(e);
+				if (e.status === 401) {
+					$('bb-status').hidden = false;
+					$('bb-status').className = 'dd-status err-status';
+					$('bb-status').textContent = 'QQ Music login required — scan the QR below';
+					startQQLogin();
+				} else {
+					analysisFailed(e);
+				}
 			}
 		}
-
-		// Local file path: no YouTube, no helper, no format lottery. The
-		// analyzer decodes the upload and beats it in place.
-		$('bb-file').addEventListener('change', async (ev) => {
-			const file = ev.target.files?.[0];
-			ev.target.value = '';
-			if (!file) return;
-			$('bb-status').hidden = false;
-			$('bb-status').className = 'dd-status pulse';
-			$('bb-status').innerHTML = `<b>Uploading ${file.name} (${(file.size / 1048576).toFixed(1)} MB)...</b>`;
-			$('bb-toggle').disabled = true;
-			try {
-				applyAnalysis(await analyzer.analyzeUpload(file));
-			} catch (e) {
-				analysisFailed(e);
-			}
-		});
 		$('bb-toggle').addEventListener('click', async () => {
 			const btn = $('bb-toggle');
 			const audio = $('bb-audio');

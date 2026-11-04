@@ -807,6 +807,7 @@
 			<ul id="bb-results" class="dd-results"></ul>
 			<div id="bb-status" class="dd-status" hidden></div>
 			<audio id="bb-audio" controls preload="auto" playsinline crossorigin="anonymous"></audio>
+			<div class="muted small" id="bb-audio-hint">Local playback is muted; press Dance! to send audio to the robot.</div>
 			<button id="bb-toggle" class="dd-btn primary" disabled>Dance!</button>
 			<div class="dd-stats">
 				<div>tempo <b id="bb-tempo">-</b></div>
@@ -1050,16 +1051,31 @@
 		const duo = new DuoConnection(ReachyMini);
 		const $ = (id) => document.getElementById(id);
 
+		// The native <audio> play button does not go through Dance!, so resume
+		// the shared AudioContext there too; otherwise the element can stall at
+		// 0:00 with no output (the graph is routed to the robot, not the Mac).
+		$('bb-audio').addEventListener('play', () => {
+			ensureAudioContext().catch((e) => console.warn('[Audio] resume failed:', e));
+		});
+
 		// Send the Beat Bandit audio graph to the wireless robot once its
 		// session is live. The SDK clears the outgoing track on stop, so this
 		// is re-applied on every streaming event.
 		duo.addEventListener('side-streaming', async (e) => {
 			if (e.detail.side !== 'wireless') return;
+			const inst = duo.sideOf('wireless').instance;
+			try {
+				await inst.ensureAwake();
+				console.log('[duo:wireless] ensureAwake, motor_mode=', inst.robotState?.motor_mode);
+			} catch (err) {
+				console.warn('[duo:wireless] ensureAwake failed:', err);
+			}
 			try {
 				const track = robotAudioDest.stream.getAudioTracks()[0];
 				if (!track) throw new Error('no outgoing audio track');
-				await duo.sideOf('wireless').instance.setOutgoingAudioTrack(track);
-				console.log('[Audio Routing] wireless outgoing audio applied');
+				const applied = await inst.setOutgoingAudioTrack(track);
+				console.log('[Audio Routing] wireless outgoing audio applied=', applied,
+					'micSupported=', inst.micSupported);
 			} catch (err) {
 				console.warn('[Audio Routing] setOutgoingAudioTrack failed:', err);
 			}
@@ -1596,7 +1612,7 @@
 			$('bb-audio').load();
 			$('bb-toggle').disabled = false;
 			$('bb-status').className = 'dd-status success';
-			$('bb-status').innerHTML = `<b>Ready: ${a.tempo.toFixed(1)} BPM</b>${a.quality ? ` · ${esc(a.quality)}` : ''}`;
+			$('bb-status').innerHTML = `<b>Ready: ${a.tempo.toFixed(1)} BPM</b>${a.quality ? ` · ${esc(a.quality)}` : ''} — press <b>Dance!</b>`;
 		}
 
 		function analysisFailed(e) {
@@ -1639,8 +1655,17 @@
 				try {
 					await ensureAudioContext();
 					try {
+						await wireless.instance.ensureAwake();
+						console.log('[duo:wireless] ensureAwake before dance, motor_mode=',
+							wireless.instance.robotState?.motor_mode);
+					} catch (e) {
+						console.warn('[duo:wireless] ensureAwake before dance failed:', e);
+					}
+					try {
 						const track = robotAudioDest.stream.getAudioTracks()[0];
-						await wireless.instance.setOutgoingAudioTrack(track);
+						const applied = await wireless.instance.setOutgoingAudioTrack(track);
+						console.log('[Audio Routing] outgoing audio applied=', applied,
+							'micSupported=', wireless.instance.micSupported);
 					} catch (e) {
 						console.warn('[Audio Routing] outgoing audio apply failed:', e);
 					}
@@ -1656,6 +1681,9 @@
 				} catch (e) {
 					console.error('Beat Bandit start failed', e);
 					beatBandit?.stop(); beatBandit = null;
+					$('bb-status').hidden = false;
+					$('bb-status').className = 'dd-status err-status';
+					$('bb-status').innerHTML = `<b>Dance failed:</b> ${esc(e.message || e)}`;
 				}
 				btn.disabled = false;
 			} else {

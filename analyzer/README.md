@@ -25,7 +25,8 @@ same-origin `/audio/...` files.
 
 - `GET /health` — liveness, cache stats, QQ login state
 - `GET /qq/state` — `{ logged_in, expired, login_type }`
-- `POST /qq/login/qrcode` — `{ session_id, qr_data_url, expires_in }`
+- `POST /qq/login/qrcode` — `{ session_id, qr_url, qr_data_url, expires_in }`
+- `GET /qq/login/qr?session=<id>` — QR image bytes
 - `GET /qq/login/status?session=<id>` — `{ status, message, logged_in }`
 - `POST /qq/logout`
 - `GET /qq/search?q=<query>&limit=8`

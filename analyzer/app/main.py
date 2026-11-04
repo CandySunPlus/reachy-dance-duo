@@ -7,7 +7,7 @@ import logging
 import os
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -28,6 +28,15 @@ app.add_middleware(
     allow_headers=["*"],
     allow_credentials=False,
 )
+
+
+@app.middleware("http")
+async def revalidate_page_code(request: Request, call_next):
+    """Let a normal reload pick up page/JS edits after a deploy."""
+    response = await call_next(request)
+    if request.url.path == "/" or request.url.path.startswith("/js/"):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
 
 # Optional static page served from the same origin (self-hosted
 # deployments mount the Dance Duo checkout here).
@@ -84,6 +93,19 @@ async def qq_login_qrcode() -> dict[str, object]:
     except Exception as exc:  # noqa: BLE001 - surface the QQ/network reason
         logger.exception("QQ login QR failed")
         raise HTTPException(status_code=502, detail=f"qq login unavailable: {exc}")
+
+
+@app.get("/qq/login/qr")
+def qq_login_qr(session: str = Query(..., min_length=8, max_length=64)) -> Response:
+    image = qq_service.login_qr_image(session)
+    if image is None:
+        raise HTTPException(status_code=404, detail="qr_not_found")
+    data, media_type = image
+    return Response(
+        content=data,
+        media_type=media_type,
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.get("/qq/login/status")
@@ -200,6 +222,7 @@ def index() -> JSONResponse:
                 "/health",
                 "/qq/state",
                 "/qq/login/qrcode (POST)",
+                "/qq/login/qr?session=",
                 "/qq/login/status?session=",
                 "/qq/logout (POST)",
                 "/qq/search?q=",

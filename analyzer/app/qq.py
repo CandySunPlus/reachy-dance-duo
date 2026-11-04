@@ -201,8 +201,19 @@ class QQMusicService:
         return {
             "session_id": session_id,
             "qr_data_url": f"data:{qr.mimetype};base64,{encoded}",
+            "qr_url": f"/qq/login/qr?session={session_id}",
             "expires_in": QR_TTL_SECONDS,
         }
+
+    def login_qr_image(self, session_id: str) -> tuple[bytes, str] | None:
+        """Return the QR image bytes for a live session, or ``None``."""
+        entry = self._qr.get(session_id)
+        if entry is None:
+            return None
+        qr, deadline = entry
+        if time.monotonic() > deadline:
+            return None
+        return qr.data, qr.mimetype
 
     async def login_status(self, session_id: str) -> dict[str, Any]:
         """Poll one QR session; persist the credential when the phone confirms."""

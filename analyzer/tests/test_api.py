@@ -145,3 +145,24 @@ def test_qq_analyze_runs_librosa_on_a_cached_track(monkeypatch, tmp_path) -> Non
     assert body["beats"]
     assert 100 < body["tempo"] < 140
     assert len(body["sequence_assignments"]) == (len(body["energy_per_beat"]) + 7) // 8
+
+
+def test_qq_login_qr_endpoint_serves_png(monkeypatch, tmp_path) -> None:
+    import time
+
+    from qqmusic_api.models.login import QR, QRLoginType
+
+    client = _client(monkeypatch, tmp_path)
+    main.qq_service._qr["session-1234"] = (
+        QR(b"\x89PNG\r\n\x1a\n", QRLoginType.QQ, "image/png", "qrsig"),
+        time.monotonic() + 60,
+    )
+
+    response = client.get("/qq/login/qr", params={"session": "session-1234"})
+    assert response.status_code == 200
+    assert response.content == b"\x89PNG\r\n\x1a\n"
+    assert response.headers["content-type"] == "image/png"
+    assert response.headers["cache-control"] == "no-store"
+
+    missing = client.get("/qq/login/qr", params={"session": "missing-1"})
+    assert missing.status_code == 404

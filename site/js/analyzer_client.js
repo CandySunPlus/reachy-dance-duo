@@ -96,9 +96,14 @@ export class AnalyzerClient {
         });
     }
 
-    // The analyzer returns audio_url as a relative path. Prepend base.
-    audioUrl(audioUrlOrPath) {
-        if (audioUrlOrPath.startsWith("http")) return audioUrlOrPath;
-        return `${this.baseUrl}${audioUrlOrPath}`;
+    // Resolve an analyzer path (audio or QR image) against the base. Absolute
+    // URLs and data/blob URLs are returned unchanged.
+    apiUrl(path) {
+        if (/^(https?:|data:|blob:)/i.test(path)) return path;
+        return `${this.baseUrl}${path}`;
+    }
+
+    audioUrl(path) {
+        return this.apiUrl(path);
     }
 }

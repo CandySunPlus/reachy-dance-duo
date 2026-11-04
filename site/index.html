@@ -876,7 +876,7 @@
 		import { DuoConnection } from './js/duo_connection.js';
 		import { LiveGroove } from './js/live_groove.js';
 		import { BeatBandit } from './js/beat_bandit.js';
-		import { AnalyzerClient } from './js/analyzer_client.js';
+		import { AnalyzerClient } from './js/analyzer_client.js?v=2';
 		import { getBreathingFrame } from './js/idle_breathing.js';
 		import { applyCyberBranding } from './js/cyber_branding.js';
 
@@ -1494,11 +1494,28 @@
 		async function startQQLogin() {
 			qqLoginPanel.hidden = false;
 			qqLoginStatus.textContent = 'Requesting QR…';
+			const qr = $('qq-qr');
+			qr.hidden = true;
+			qr.removeAttribute('src');
 			qqLoginBtn.disabled = true;
 			try {
-				const login = await analyzer.qqLoginQrcode();
+				const login = await Promise.race([
+					analyzer.qqLoginQrcode(),
+					new Promise((_, reject) => setTimeout(() => reject(new Error('QR request timed out')), 30000)),
+				]);
 				qqSession = login.session_id;
-				$('qq-qr').src = login.qr_data_url;
+				let fellBack = false;
+				qr.onload = () => { qr.hidden = false; };
+				qr.onerror = () => {
+					if (!fellBack && login.qr_data_url) {
+						fellBack = true;
+						qr.src = login.qr_data_url;
+					} else {
+						qr.hidden = true;
+						qqLoginStatus.textContent = 'QR image failed to load; try Log in again';
+					}
+				};
+				qr.src = login.qr_url ? analyzer.apiUrl(login.qr_url) : login.qr_data_url;
 				qqLoginStatus.textContent = 'Scan with QQ or WeChat, then confirm on your phone.';
 				clearTimeout(qqPollTimer);
 				pollQQLogin();

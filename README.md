@@ -70,7 +70,8 @@ Sign-in:
 |---|---|
 | `GET /health` | liveness, cache stats, QQ login state |
 | `GET /qq/state` | QQ login state (no tokens) |
-| `POST /qq/login/qrcode` | create a QQ login QR; returns a data URL + session id |
+| `POST /qq/login/qrcode` | create a QQ login QR; returns a session id, image URL, and data URL |
+| `GET /qq/login/qr?session=` | QR image bytes for the login panel |
 | `GET /qq/login/status?session=` | poll the QR session; persists the credential on success |
 | `POST /qq/logout` | delete the stored credential |
 | `GET /qq/search?q=&limit=` | QQ Music song search |

@@ -193,3 +193,15 @@ def test_search_falls_back_to_anonymous_on_auth_error(tmp_path, monkeypatch) -> 
             "pay_play": 1,
         }
     ]
+
+
+def test_login_qr_image_returns_bytes_and_rejects_unknown(tmp_path) -> None:
+    from qqmusic_api.models.login import QR, QRLoginType
+
+    service = qq.QQMusicService(tmp_path / "credential.json")
+    service._qr["session-1234"] = (
+        QR(b"\x89PNG\r\n\x1a\n", QRLoginType.QQ, "image/png", "qrsig"),
+        time.monotonic() + 60,
+    )
+    assert service.login_qr_image("session-1234") == (b"\x89PNG\r\n\x1a\n", "image/png")
+    assert service.login_qr_image("missing") is None

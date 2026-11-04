@@ -104,8 +104,18 @@ export class DuoConnection extends EventTarget {
                 // the track"; the page supplies audio via
                 // setOutgoingAudioTrack, so drop the placeholder first.
                 if (msg?.sdp?.type === 'offer' && inst._micStream) {
-                    for (const track of inst._micStream.getAudioTracks()) {
-                        inst._micStream.removeTrack(track);
+                    // Keep the placeholder on the FIRST offer: the SDK adds
+                    // it before createAnswer, which is what makes the local
+                    // answer `sendrecv`. Removing it there yields a recvonly
+                    // answer and the robot never receives audio. On later
+                    // offers an audio sender already exists; drop the
+                    // placeholder so addTrack cannot throw.
+                    const hasAudioSender = inst._pc?.getSenders?.()
+                        .some((sender) => sender.track?.kind === 'audio');
+                    if (hasAudioSender) {
+                        for (const track of inst._micStream.getAudioTracks()) {
+                            inst._micStream.removeTrack(track);
+                        }
                     }
                 }
                 const kind = msg?.sdp ? `sdp:${msg.sdp.type}` : (msg?.ice ? 'ice' : '?');
@@ -118,6 +128,12 @@ export class DuoConnection extends EventTarget {
                     console.log(`${tag} audio sdp:`, audio.join(' | '));
                 }
                 const result = await origPeerMessage(msg);
+                if (msg?.sdp?.type === 'offer') {
+                    const local = String(inst._pc?.localDescription?.sdp || '').split('\r\n').filter(
+                        (line) => /^(m=audio|a=sendrecv|a=recvonly|a=sendonly|a=inactive)/.test(line),
+                    );
+                    console.log(`${tag} answer audio:`, local.join(' | '));
+                }
                 // The SDK only recognizes an explicit a=sendrecv. If the
                 // daemon omits it but the offer has an audio m-line, the
                 // transceiver exists; re-apply the app's track directly.
